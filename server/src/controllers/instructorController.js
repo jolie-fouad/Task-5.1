@@ -1,19 +1,16 @@
-
 import { loginSchema, searchSchema } from '../validators/instructorValidator.js';
 import { Instructor } from '../models/Instructor.js';
 
 // =============================================================================
-//  INSTRUCTOR PORTAL CONTROLLER  —  ⚠️ INTENTIONALLY VULNERABLE (security lab)
+//  INSTRUCTOR PORTAL CONTROLLER  —  hardened against NoSQL injection
 // =============================================================================
 //
-// Unlike the review/auth controllers in this project, these handlers do NOT
-// validate input with Joi and the app has NO express-mongo-sanitize. They pass
-// `req.body` / `req.query` straight into Mongoose. Because Express parses JSON
-// bodies and bracket-notation query strings into nested objects, an attacker
-// can smuggle MongoDB query operators ($ne, $gt, $regex, $where, ...) into
-// what the code treats as plain strings.
-//
-// This is the bug students must find and fix. Do not "clean this up".
+// Defenses in this file (defense in depth):
+//   1. express-mongo-sanitize (in app.js) strips any key with `$` or `.`.
+//   2. Joi validates the shape/type of input before it reaches Mongoose.
+//   3. Login looks up by username only, then verifies the password with bcrypt.
+//   4. Passwords are bcrypt-hashed (see the Instructor model).
+//   5. Secret fields (password/apiKey/private*) are never returned.
 // =============================================================================
 
 // Only non-sensitive fields are ever returned to the client.
@@ -37,13 +34,6 @@ export async function loginInstructor(req, res, next) {
     }
     const { username, password } = value;
 
-    // ⚠️ VULNERABLE (NoSQL injection): `username` and `password` are placed
-    // directly into the query. Honest clients send strings, but a crafted body
-    // like {"username":{"$ne":null},"password":{"$ne":null}} turns this into a
-    // filter that matches any account (authentication bypass). With
-    // {"password":{"$regex":"^S"}} the success/failure response becomes an
-    // oracle for extracting the stored password one character at a time.
-
     // SECURITY: look up by username ONLY, then verify the password with bcrypt.
     // The password is never part of the query, so it can't be injected or regex-probed.
     const instructor = await Instructor.findOne({ username }).select('+password');
@@ -58,8 +48,7 @@ export async function loginInstructor(req, res, next) {
 }
 
 // GET /api/instructors
-// Public directory. Deliberately limited fields so the contrast with the
-// leaky /search endpoint below is obvious.
+// Public directory. Deliberately limited fields.
 export async function getDirectory(req, res, next) {
   try {
     const instructors = await Instructor.find()
@@ -75,18 +64,19 @@ export async function getDirectory(req, res, next) {
 // GET /api/instructors/search
 export async function searchInstructors(req, res, next) {
   try {
-    // SECURITY: only allow filtering by the three public fields, each a string.
-    const { error, value } = searchSchema.validate(req.query);
-    if (error) {
-      return res.status(400).json({ message: error.details[0].message });
-    }
+    // SECURITY: never trust req.query. Ignore anything that isn't one of the
+    // three public string fields. stripUnknown drops unexpected keys (e.g.
+    // injected ones) instead of rejecting; convert:false keeps non-strings out.
+    const { value } = searchSchema.validate(req.query, {
+      stripUnknown: true,
+      convert: false
+    });
 
-    // SECURITY: build the filter ourselves from validated values only.
-    // String(...) guarantees a primitive string, never an object/operator.
+    // SECURITY: build the filter ourselves, only from clean string values.
     const filter = {};
-    if (value.name !== undefined) filter.name = String(value.name);
-    if (value.department !== undefined) filter.department = String(value.department);
-    if (value.role !== undefined) filter.role = String(value.role);
+    if (typeof value?.name === 'string') filter.name = value.name;
+    if (typeof value?.department === 'string') filter.department = value.department;
+    if (typeof value?.role === 'string') filter.role = value.role;
 
     // SECURITY: return only public fields (no password / apiKey / private info).
     const instructors = await Instructor.find(filter)
